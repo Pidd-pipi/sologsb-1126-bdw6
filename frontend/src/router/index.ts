@@ -1,6 +1,6 @@
 import { createRouter, createWebHistory, type RouteRecordRaw } from 'vue-router'
 
-/** 路由表：/、/sites/new、/sites/:id、/scoring、/map、/veto —— 与提示词「核心页面」一一对应。 */
+/** 路由表：/、/sites/new、/sites/:id、/scoring、/map、/veto、/drill —— 与提示词「核心页面」一一对应。 */
 export const routes: RouteRecordRaw[] = [
   {
     path: '/',
@@ -37,6 +37,12 @@ export const routes: RouteRecordRaw[] = [
     name: 'veto',
     component: () => import('@/pages/Veto.vue'),
     meta: { title: '风险否决登记' }
+  },
+  {
+    path: '/drill',
+    name: 'drill',
+    component: () => import('@/pages/Drill.vue'),
+    meta: { title: '汛期演练排营' }
   },
   {
     path: '/:pathMatch(.*)*',

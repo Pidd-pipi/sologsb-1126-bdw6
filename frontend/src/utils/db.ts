@@ -5,6 +5,8 @@
  *   v1 建 sites / factors 两张表
  *   v2 新增 profiles 表，并为 factors 补 siteId 索引
  *   v3 新增 vetos 表，并为存量营位回填默认权重方案
+ *   v4 新增 plans 表（汛期演练占用单）
+ *   v5 plans 表结构不变，迁移缺少容量口径快照的旧计划为「待补录」
  */
 import Dexie, { type Table } from 'dexie'
 import type { Campsite } from '@/types/campsite'
@@ -12,16 +14,20 @@ import type { FactorAssessment } from '@/types/factor'
 import type { ScoreProfile } from '@/types/score'
 import { DEFAULT_WEIGHTS } from '@/types/score'
 import type { RiskVeto } from '@/types/veto'
+import type { DrillPlan } from '@/types/drill'
+import { RESERVE_RATIO } from '@/types/drill'
+import { nowIso } from '@/utils/format'
 
 export const DB_NAME = 'gbcampsite-db'
 /** 当前数据结构版本号 */
-export const DB_VERSION = 3
+export const DB_VERSION = 5
 
 export class GbCampsiteDatabase extends Dexie {
   sites!: Table<Campsite, number>
   factors!: Table<FactorAssessment, number>
   profiles!: Table<ScoreProfile, number>
   vetos!: Table<RiskVeto, number>
+  plans!: Table<DrillPlan, number>
 
   constructor() {
     super(DB_NAME)
@@ -53,7 +59,7 @@ export class GbCampsiteDatabase extends Dexie {
       })
 
     // v3：新增风险否决表；为存量营位回填默认方案 id 与新增字段缺省值
-    this.version(DB_VERSION)
+    this.version(3)
       .stores({
         sites: '++id, code, name, campName, surface, access, defaultProfileId, updatedAt',
         factors: '++id, siteId, assessedAt, assessor',
@@ -74,6 +80,30 @@ export class GbCampsiteDatabase extends Dexie {
             if (typeof s.tentCapacity !== 'number') s.tentCapacity = 1
           })
       })
+
+    // v4：新增汛期演练占用单表
+    this.version(4).stores({
+      sites: '++id, code, name, campName, surface, access, defaultProfileId, updatedAt',
+      factors: '++id, siteId, assessedAt, assessor',
+      profiles: '++id, name, season, active, updatedAt',
+      vetos: '++id, siteId, type, judgedAt',
+      plans: '++id, planNo, campName, status, createdAt'
+    })
+
+    // v5：plans 结构不变（容量口径为非索引字段），仅迁移存量数据：
+    // 缺少容量口径快照的旧计划一律列为「待补录」，重新确认前不得沿用原推荐结果
+    this.version(DB_VERSION).upgrade(async (tx) => {
+      await tx
+        .table('plans')
+        .toCollection()
+        .modify((p: Partial<DrillPlan>) => {
+          if (p.capacity == null && p.status !== 'pending-backfill') {
+            p.status = 'pending-backfill'
+            p.reason = '升级迁移：缺少容量口径快照，列为待补录，重新确认前不进入推荐名单'
+            p.updatedAt = nowIso()
+          }
+        })
+    })
   }
 }
 
@@ -369,14 +399,70 @@ function seedVetos(): RiskVeto[] {
   ]
 }
 
+/**
+ * 样例占用单：两张已生效（带容量口径快照），一张模拟 v4 时代遗留、
+ * 缺少容量口径的旧计划 —— 经 v5 迁移规则列为「待补录」，不计入已占、不进推荐名单。
+ */
+function seedPlans(): DrillPlan[] {
+  const caliber = (totalCapacity: number, occupiedBefore: number): DrillPlan['capacity'] => ({
+    totalCapacity,
+    reserveRatio: RESERVE_RATIO,
+    bookableCapacity: Math.floor(totalCapacity * (1 - RESERVE_RATIO)),
+    occupiedBefore,
+    snapshotAt: SEED_TS
+  })
+  return [
+    {
+      id: 1,
+      planNo: 'DP-0001',
+      leader: '林舟',
+      campName: '云栖山谷营地',
+      tentCount: 8,
+      status: 'confirmed',
+      reason: '',
+      capacity: caliber(10, 0),
+      createdAt: SEED_TS,
+      updatedAt: SEED_TS
+    },
+    {
+      id: 2,
+      planNo: 'DP-0002',
+      leader: '赵岚',
+      campName: '北岭高地营地',
+      tentCount: 6,
+      status: 'confirmed',
+      reason: '',
+      capacity: caliber(10, 0),
+      createdAt: SEED_TS,
+      updatedAt: SEED_TS
+    },
+    {
+      id: 3,
+      planNo: 'DP-0003',
+      leader: '老K',
+      campName: '杉木坪营地',
+      tentCount: 5,
+      status: 'pending-backfill',
+      reason: '升级迁移：缺少容量口径快照，列为待补录，重新确认前不进入推荐名单',
+      capacity: null,
+      createdAt: SEED_TS,
+      updatedAt: SEED_TS
+    }
+  ]
+}
+
 /** 首次运行写入样例数据，保证每个页面首屏都有可评估的内容。 */
 export async function seedIfEmpty(): Promise<void> {
   const count = await db.sites.count()
   if (count > 0) return
-  await db.transaction('rw', db.sites, db.factors, db.profiles, db.vetos, async () => {
+  await db.transaction('rw', db.sites, db.factors, db.profiles, db.vetos, db.plans, async () => {
     await db.profiles.bulkPut(seedProfiles())
     await db.sites.bulkPut(seedSites())
     await db.factors.bulkPut(seedFactors())
     await db.vetos.bulkPut(seedVetos())
+    // 老库升级后可能已有占用单：只在 plans 为空时补种子，避免覆盖真实数据
+    if ((await db.plans.count()) === 0) {
+      await db.plans.bulkPut(seedPlans())
+    }
   })
 }

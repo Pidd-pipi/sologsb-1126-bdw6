@@ -2,7 +2,7 @@
 
 const PREFIX = 'gbcampsite:draft:'
 
-export type DraftKey = 'site-new' | 'veto-new' | 'scoring-profile'
+export type DraftKey = 'site-new' | 'veto-new' | 'scoring-profile' | 'drill-new'
 
 function fullKey(key: string): string {
   return `${PREFIX}${key}`
