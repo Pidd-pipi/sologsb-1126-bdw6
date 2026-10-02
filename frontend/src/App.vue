@@ -8,12 +8,14 @@ import { useRoute } from 'vue-router'
 import { useSiteStore } from '@/stores/siteStore'
 import { useProfileStore } from '@/stores/profileStore'
 import { useUiStore } from '@/stores/uiStore'
+import { useOccupancyStore } from '@/stores/occupancyStore'
 import { resolveAmapKey } from '@/hooks/useAmapLoader'
 
 const route = useRoute()
 const siteStore = useSiteStore()
 const profileStore = useProfileStore()
 const uiStore = useUiStore()
+const occupancyStore = useOccupancyStore()
 
 const activeMenu = computed(() => {
   const path = route.path
@@ -22,6 +24,7 @@ const activeMenu = computed(() => {
   if (path.startsWith('/scoring')) return '/scoring'
   if (path.startsWith('/map')) return '/map'
   if (path.startsWith('/veto')) return '/veto'
+  if (path.startsWith('/occupancy')) return '/occupancy'
   return ''
 })
 
@@ -33,8 +36,11 @@ onMounted(async () => {
   await Promise.all([
     siteStore.load(),
     profileStore.load(),
-    uiStore.loadVetos()
+    uiStore.loadVetos(),
+    occupancyStore.load()
   ])
+  // 营位占用：订阅跨标签页变更（BroadcastChannel）与窗口聚焦补拉
+  occupancyStore.startSync()
 })
 </script>
 
@@ -54,6 +60,7 @@ onMounted(async () => {
         <el-menu-item index="/scoring">权重与评分</el-menu-item>
         <el-menu-item index="/map">营位地图</el-menu-item>
         <el-menu-item index="/veto">风险否决</el-menu-item>
+        <el-menu-item index="/occupancy">营位占用</el-menu-item>
       </el-menu>
       <div class="app-aside">
         <el-tag type="info" effect="plain" size="small">{{ mapModeText }}</el-tag>
@@ -68,7 +75,7 @@ onMounted(async () => {
       </router-view>
     </el-main>
     <el-footer class="app-footer">
-      数据全部保存在浏览器本地（IndexedDB 存营位/因子/方案/否决记录、localStorage 存表单草稿），无后端服务与外部接口。
+      数据全部保存在浏览器本地（IndexedDB 存营位/因子/方案/否决/占用计划、localStorage 存表单草稿），无后端服务与外部接口。
     </el-footer>
   </el-container>
 </template>

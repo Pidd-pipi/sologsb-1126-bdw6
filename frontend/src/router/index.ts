@@ -39,6 +39,12 @@ export const routes: RouteRecordRaw[] = [
     meta: { title: '风险否决登记' }
   },
   {
+    path: '/occupancy',
+    name: 'occupancy',
+    component: () => import('@/pages/Occupancy.vue'),
+    meta: { title: '营位占用' }
+  },
+  {
     path: '/:pathMatch(.*)*',
     redirect: '/'
   }

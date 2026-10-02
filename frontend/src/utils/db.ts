@@ -5,6 +5,7 @@
  *   v1 建 sites / factors 两张表
  *   v2 新增 profiles 表，并为 factors 补 siteId 索引
  *   v3 新增 vetos 表，并为存量营位回填默认权重方案
+ *   v4 新增 plans（营位占用计划）表；旧计划升级时无容量口径的记录列为待补，不沿用原推荐结果
  */
 import Dexie, { type Table } from 'dexie'
 import type { Campsite } from '@/types/campsite'
@@ -12,16 +13,21 @@ import type { FactorAssessment } from '@/types/factor'
 import type { ScoreProfile } from '@/types/score'
 import { DEFAULT_WEIGHTS } from '@/types/score'
 import type { RiskVeto } from '@/types/veto'
+import type { OccupancyPlan } from '@/types/plan'
+import { EMERGENCY_RESERVE_RATIO } from '@/types/plan'
+import { campCapacity, usableCapacityOf } from '@/utils/capacity'
+import { buildRecommendationSnapshot } from '@/utils/occupancy'
 
 export const DB_NAME = 'gbcampsite-db'
 /** 当前数据结构版本号 */
-export const DB_VERSION = 3
+export const DB_VERSION = 4
 
 export class GbCampsiteDatabase extends Dexie {
   sites!: Table<Campsite, number>
   factors!: Table<FactorAssessment, number>
   profiles!: Table<ScoreProfile, number>
   vetos!: Table<RiskVeto, number>
+  plans!: Table<OccupancyPlan, number>
 
   constructor() {
     super(DB_NAME)
@@ -53,7 +59,7 @@ export class GbCampsiteDatabase extends Dexie {
       })
 
     // v3：新增风险否决表；为存量营位回填默认方案 id 与新增字段缺省值
-    this.version(DB_VERSION)
+    this.version(3)
       .stores({
         sites: '++id, code, name, campName, surface, access, defaultProfileId, updatedAt',
         factors: '++id, siteId, assessedAt, assessor',
@@ -72,6 +78,35 @@ export class GbCampsiteDatabase extends Dexie {
             if (typeof s.note !== 'string') s.note = ''
             if (typeof s.flatness !== 'number') s.flatness = 70
             if (typeof s.tentCapacity !== 'number') s.tentCapacity = 1
+          })
+      })
+
+    // v4：新增营位占用计划表；旧计划升级时，没有容量口径的记录列为待补，且不沿用原推荐结果
+    this.version(DB_VERSION)
+      .stores({
+        sites: '++id, code, name, campName, surface, access, defaultProfileId, updatedAt',
+        factors: '++id, siteId, assessedAt, assessor',
+        profiles: '++id, name, season, active, updatedAt',
+        vetos: '++id, siteId, type, judgedAt',
+        plans: '++id, code, campName, leader, status, confirmedAt, createdAt'
+      })
+      .upgrade(async (tx) => {
+        // 旧版计划升级：没有容量口径的记录列为待补，且不得沿用原推荐结果
+        await tx
+          .table('plans')
+          .toCollection()
+          .modify((p: Partial<OccupancyPlan>) => {
+            // 没有容量口径的旧计划：列为待补，推荐结果作废，待重新确认时重算
+            if (p.capacity == null) {
+              p.status = 'pending'
+              p.recommendation = null
+              p.invalidReason =
+                typeof p.invalidReason === 'string' && p.invalidReason
+                  ? p.invalidReason
+                  : '旧版计划升级：缺少容量口径，待补录后重新确认'
+              p.invalidAt = null
+              p.confirmedAt = null
+            }
           })
       })
   }
@@ -373,10 +408,117 @@ function seedVetos(): RiskVeto[] {
 export async function seedIfEmpty(): Promise<void> {
   const count = await db.sites.count()
   if (count > 0) return
-  await db.transaction('rw', db.sites, db.factors, db.profiles, db.vetos, async () => {
-    await db.profiles.bulkPut(seedProfiles())
-    await db.sites.bulkPut(seedSites())
-    await db.factors.bulkPut(seedFactors())
-    await db.vetos.bulkPut(seedVetos())
-  })
+  const profiles = seedProfiles()
+  const sites = seedSites()
+  const factors = seedFactors()
+  const vetos = seedVetos()
+  const plans = seedPlans({ profiles, sites, factors, vetos })
+  await db.transaction(
+    'rw',
+    db.sites,
+    db.factors,
+    db.profiles,
+    db.vetos,
+    db.plans,
+    async () => {
+      await db.profiles.bulkPut(profiles)
+      await db.sites.bulkPut(sites)
+      await db.factors.bulkPut(factors)
+      await db.vetos.bulkPut(vetos)
+      await db.plans.bulkPut(plans)
+    }
+  )
+}
+
+/* --------------------------- 营位占用计划样例 --------------------------- */
+
+/** 由样例数据生成占用计划：两条已生效（带容量口径与推荐名单快照）+ 一条待补旧计划。 */
+function seedPlans(input: {
+  profiles: ScoreProfile[]
+  sites: Campsite[]
+  factors: FactorAssessment[]
+  vetos: RiskVeto[]
+}): OccupancyPlan[] {
+  const { profiles, sites, factors, vetos } = input
+  const active = profiles.find((p) => p.active) ?? profiles[0] ?? null
+  const weights = { ...DEFAULT_WEIGHTS, ...(active?.weights ?? {}) }
+  const normalize = active?.normalize ?? 'minmax'
+  const thresholds = active?.thresholds ?? { gradeA: 78, gradeB: 58 }
+  const profileId = active?.id ?? null
+
+  const recommendationOf = (campName: string) =>
+    buildRecommendationSnapshot({
+      campName,
+      sites,
+      factors,
+      vetos,
+      weights,
+      normalize,
+      thresholds,
+      profileId
+    })
+
+  /** 容量口径快照：occupiedBefore 为该营地本单之前已占（样例中各营地仅一单已生效）。 */
+  const capacityOf = (campName: string, occupiedBefore: number, tents: number) => {
+    const { total, siteIds } = campCapacity(sites, campName)
+    const usable = usableCapacityOf(total)
+    return {
+      totalCapacity: total,
+      reserveRatio: EMERGENCY_RESERVE_RATIO,
+      usableCapacity: usable,
+      occupiedBefore,
+      remainingAfter: usable - occupiedBefore - tents,
+      siteIds,
+      computedAt: SEED_TS
+    }
+  }
+
+  const base = {
+    invalidReason: '',
+    invalidAt: null as string | null,
+    note: '',
+    createdAt: SEED_TS,
+    updatedAt: SEED_TS
+  }
+
+  return [
+    {
+      ...base,
+      id: 1,
+      code: 'ZY-0001',
+      campName: '云栖山谷营地',
+      leader: '李营',
+      tents: 8,
+      status: 'confirmed',
+      capacity: capacityOf('云栖山谷营地', 0, 8),
+      recommendation: recommendationOf('云栖山谷营地'),
+      confirmedAt: SEED_TS
+    },
+    {
+      ...base,
+      id: 2,
+      code: 'ZY-0002',
+      campName: '北岭高地营地',
+      leader: '周勘',
+      tents: 5,
+      status: 'confirmed',
+      capacity: capacityOf('北岭高地营地', 0, 5),
+      recommendation: recommendationOf('北岭高地营地'),
+      confirmedAt: SEED_TS
+    },
+    {
+      ...base,
+      id: 3,
+      code: 'ZY-0003',
+      campName: '杉木坪营地',
+      leader: '陈巡',
+      tents: 4,
+      status: 'pending',
+      capacity: null,
+      recommendation: null,
+      invalidReason: '旧版计划升级：缺少容量口径，列为待补，不沿用原推荐结果；补录容量并重新确认后生效。',
+      confirmedAt: null,
+      note: '汛期演练前导入的旧计划，需补录容量口径。'
+    }
+  ]
 }

@@ -9,6 +9,7 @@ import type { RiskVeto } from '@/types/veto'
 import type { FactorWeights, NormalizeMethod, GradeThresholds } from '@/types/score'
 import { DEFAULT_WEIGHTS } from '@/types/score'
 import type { AccessMode, SurfaceType } from '@/types/campsite'
+import { useOccupancyStore } from '@/stores/occupancyStore'
 import { nowIso, todayIso } from '@/utils/format'
 
 export const useUiStore = defineStore('ui', () => {
@@ -51,12 +52,17 @@ export const useUiStore = defineStore('ui', () => {
     delete record.id
     const id = await db.vetos.add(record)
     await loadVetos()
+    // 风险否决变化：相关营地的已生效计划立即失效，重新确认前不进入推荐名单
+    await useOccupancyStore().invalidateForSite(input.siteId, '风险否决变化')
     return id
   }
 
   async function removeVeto(id: number): Promise<void> {
+    const veto = vetos.value.find((v) => v.id === id)
     await db.vetos.delete(id)
     await loadVetos()
+    // 风险否决变化：相关营地的已生效计划立即失效
+    if (veto) await useOccupancyStore().invalidateForSite(veto.siteId, '风险否决变化')
   }
 
   /** 某营位命中的全部否决项 */

@@ -4,6 +4,7 @@ import { defineStore } from 'pinia'
 import { db, toPlain } from '@/utils/db'
 import type { Campsite } from '@/types/campsite'
 import type { FactorAssessment } from '@/types/factor'
+import { useOccupancyStore } from '@/stores/occupancyStore'
 import { nextSerialNo, nowIso, todayIso } from '@/utils/format'
 
 export const useSiteStore = defineStore('site', () => {
@@ -66,12 +67,17 @@ export const useSiteStore = defineStore('site', () => {
     delete record.id
     const id = await db.factors.add(record)
     await load()
+    // 营位因子变化：相关营地的已生效计划立即失效，重新确认前不进入推荐名单
+    await useOccupancyStore().invalidateForSite(input.siteId, '因子评估变化')
     return id
   }
 
   async function removeFactor(id: number): Promise<void> {
+    const factor = factors.value.find((f) => f.id === id)
     await db.factors.delete(id)
     await load()
+    // 营位因子变化：相关营地的已生效计划立即失效
+    if (factor) await useOccupancyStore().invalidateForSite(factor.siteId, '因子评估变化')
   }
 
   function byId(id: number | null | undefined): Campsite | null {
